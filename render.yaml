@@ -1,0 +1,9 @@
+services:
+  - type: web
+    name: extract-audio-api
+    env: node
+    region: frankfurt # or oregon/singapore depending on your users
+    plan: free
+    buildCommand: apt-get update && apt-get install -y ffmpeg && npm install
+    startCommand: node server.js
+    autoDeploy: true
