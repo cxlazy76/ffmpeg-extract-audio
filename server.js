@@ -3,52 +3,75 @@ import fetch from "node-fetch";
 import fs from "fs";
 import { exec } from "child_process";
 import { promisify } from "util";
-import path from "path";
+import { S3Client, PutObjectCommand } from "@aws-sdk/client-s3";
 
-const app = express();
 const run = promisify(exec);
-app.use(express.json({ limit: "100mb" }));
+const app = express();
+app.use(express.json());
 
-app.get("/", (req, res) => {
-  res.send("✅ API running. POST /extract with { video_url }");
+// --- Initialize Backblaze S3 client ---
+const s3 = new S3Client({
+  region: "auto",
+  endpoint: process.env.B2_ENDPOINT,
+  credentials: {
+    accessKeyId: process.env.B2_KEY_ID,
+    secretAccessKey: process.env.B2_APPLICATION_KEY,
+  },
 });
 
+// --- Helper to upload a file to B2 ---
+async function uploadToB2(localPath, keyName) {
+  const fileStream = fs.createReadStream(localPath);
+  const uploadParams = {
+    Bucket: process.env.B2_BUCKET,
+    Key: keyName,
+    Body: fileStream,
+    ACL: "public-read",
+    ContentType: keyName.endsWith(".mp3") ? "audio/mpeg" : "video/mp4",
+  };
+  await s3.send(new PutObjectCommand(uploadParams));
+  return `https://${process.env.B2_BUCKET}.${process.env.B2_ENDPOINT}/${keyName}`;
+}
+
+// --- Extract & Upload Route ---
 app.post("/extract", async (req, res) => {
   try {
     const { video_url } = req.body;
-    if (!video_url) return res.status(400).json({ error: "Missing video_url" });
+    if (!video_url) {
+      return res.status(400).json({ error: "Missing video_url" });
+    }
 
-    // temp input path (will be deleted)
-    const inputPath = path.resolve("./temp_input.mp4");
-    const audioPath = path.resolve("./output_audio.mp3");
-    const mutedVideoPath = path.resolve("./output_muted.mp4");
+    const videoPath = "input.mp4";
+    const audioPath = "output_audio.mp3";
+    const mutedVideoPath = "output_muted.mp4";
 
-    // download video
+    // 1️⃣ Download video
     const response = await fetch(video_url);
-    if (!response.ok) throw new Error("Failed to download video");
-    const fileStream = fs.createWriteStream(inputPath);
-    await new Promise((resolve, reject) => {
-      response.body.pipe(fileStream);
-      response.body.on("error", reject);
-      fileStream.on("finish", resolve);
-    });
+    const buffer = await response.arrayBuffer();
+    fs.writeFileSync(videoPath, Buffer.from(buffer));
 
-    // extract audio (mp3)
-    await run(`ffmpeg -y -i "${inputPath}" -vn -acodec libmp3lame -q:a 2 "${audioPath}"`);
-    // make muted video (copy video stream, drop audio)
-    await run(`ffmpeg -y -i "${inputPath}" -an -vcodec copy "${mutedVideoPath}"`);
+    // 2️⃣ Extract audio
+    await run(`ffmpeg -i ${videoPath} -q:a 0 -map a ${audioPath} -y`);
+    // 3️⃣ Create muted video
+    await run(`ffmpeg -i ${videoPath} -an ${mutedVideoPath} -y`);
 
-    // delete temp input
-    fs.unlinkSync(inputPath);
+    // 4️⃣ Upload both to B2
+    const audioUrl = await uploadToB2(audioPath, "output_audio.mp3");
+    const videoUrl = await uploadToB2(mutedVideoPath, "output_muted.mp4");
+
+    // 5️⃣ Clean up
+    fs.unlinkSync(videoPath);
+    fs.unlinkSync(audioPath);
+    fs.unlinkSync(mutedVideoPath);
 
     res.json({
       success: true,
-      message: "Muted video and audio created.",
-      audio: audioPath,
-      muted_video: mutedVideoPath
+      message: "Files uploaded to Backblaze B2",
+      audio_url: audioUrl,
+      muted_video_url: videoUrl,
     });
   } catch (err) {
-    console.error("Error:", err);
+    console.error(err);
     res.status(500).json({ error: err.message });
   }
 });
