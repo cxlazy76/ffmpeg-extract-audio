@@ -50,10 +50,11 @@ app.post("/extract", async (req, res) => {
     const buffer = await response.arrayBuffer();
     fs.writeFileSync(videoPath, Buffer.from(buffer));
 
-    // 2️⃣ Extract audio
-    await run(`ffmpeg -i ${videoPath} -q:a 0 -map a ${audioPath} -y`);
-    // 3️⃣ Create muted video
-    await run(`ffmpeg -i ${videoPath} -an ${mutedVideoPath} -y`);
+    // 2️⃣ Extract audio (low-memory version)
+    await run(`ffmpeg -i "${videoPath}" -vn -acodec libmp3lame -b:a 64k "${audioPath}" -y`);
+
+    // 3️⃣ Create muted video (low-memory version)
+    await run(`ffmpeg -i "${videoPath}" -an -c:v libx264 -preset ultrafast -crf 35 "${mutedVideoPath}" -y`);
 
     // 4️⃣ Upload both to B2
     const audioUrl = await uploadToB2(audioPath, "output_audio.mp3");
